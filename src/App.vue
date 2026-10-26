@@ -31,6 +31,8 @@ const message = ref('')
 const searchQuery = ref('')
 const fileInput = ref(null)
 const maxFileSize = 5 * 1024 * 1024
+// The backend URL is public; use Render's API in production and Vite's proxy locally.
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://resumeiq-pvil.onrender.com').replace(/\/$/, '')
 const isDarkMode = ref(false)
 const isBusy = ref(false)
 const displayName = ref('Jordan Davis')
@@ -197,7 +199,7 @@ async function analyzeResume() {
     if (!isSampleResume.value) {
       const formData = new FormData()
       formData.append('file', selectedFile.value)
-      const extractionResponse = await fetch('/api/resumes/extract', {
+      const extractionResponse = await fetch(`${API_BASE_URL}/api/resumes/extract`, {
         method: 'POST',
         body: formData,
       })
@@ -209,7 +211,7 @@ async function analyzeResume() {
       text = extraction.text
     }
 
-    const response = await fetch('/api/resumes/analyze', {
+    const response = await fetch(`${API_BASE_URL}/api/resumes/analyze`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
