@@ -5,3 +5,4 @@ PyMuPDF
 pytest
 httpx
 python-dotenv
+google-genai

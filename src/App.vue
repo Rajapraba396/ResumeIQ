@@ -177,61 +177,10 @@ function preventFileNavigation(event) {
   }
 }
 
-function buildDemoAnalysis(text, level, style) {
-  const lines = text.split(/\n+/).map((line) => line.trim()).filter(Boolean)
-  const skills = [
-    'Project coordination',
-    'Communication',
-    'Process improvement',
-    'Scheduling',
-    'Reporting',
-    'Stakeholder support',
-  ].filter((skill) => text.toLowerCase().includes(skill.toLowerCase().split(' ')[0]))
-
-  const summary =
-    style === 'Brief'
-      ? 'This resume highlights a candidate with strong coordination, communication, and process-support skills. The candidate demonstrates clear experience managing schedules, supporting teams, and improving daily operations.'
-      : style === 'Bullet Points'
-        ? '• Strong experience in operations coordination and day-to-day workflow support.\n• Clear examples of stakeholder communication and process documentation.\n• Solid alignment with team-based, service-oriented roles.'
-        : 'This resume presents a candidate with meaningful experience in operations support, team coordination, and process improvement. Their background suggests a practical, dependable professional who can manage schedules, reinforce documentation, and keep cross-functional work organized.'
-
-  const experience = lines.filter((line) => /experience|coordinator|analyst|assistant|manager|specialist|intern/i.test(line))
-  const education = lines.filter((line) => /bachelor|degree|university|college|school|education/i.test(line))
-
-  return {
-    filename: sampleResume.fileName,
-    file_type: 'TXT',
-    extracted_text: text,
-    analysis_status: 'demo_mode',
-    message: 'Sample data is loaded in demo mode. Connect the Gemini API to analyze real resumes.',
-    summary,
-    skills: skills.length ? skills : ['Communication', 'Operations support', 'Process improvement'],
-    experience: experience.length ? experience.slice(0, 3) : ['Relevant experience and role responsibilities are described in the sample.', 'Strong examples of coordination and customer support.'],
-    education: education.length ? education.slice(0, 2) : ['Education details are included in the sample resume.'],
-    completeness: 86,
-    highlights: [
-      'Well-structured experience section with clear responsibilities.',
-      'Strong service-oriented language and operational focus.',
-      'Good fit for project coordination and support roles.',
-    ],
-    analysis_level: level,
-    summary_style: style,
-    completedAt: new Date().toLocaleString(),
-  }
-}
-
 async function analyzeResume() {
   if (!hasResumeSelection.value) return
 
-  if (isSampleResume.value) {
-    const demoAnalysis = buildDemoAnalysis(sampleResume.text, analysisLevel.value, summaryStyle.value)
-    selectedAnalysis.value = demoAnalysis
-    analysisHistory.value = [demoAnalysis, ...analysisHistory.value.filter((resume) => resume.filename !== demoAnalysis.filename)].slice(0, 8)
-    message.value = 'Demo resume loaded successfully. This sample stays separate from your real resume history.'
-    return
-  }
-
-  if (!selectedFile.value) {
+  if (!isSampleResume.value && !selectedFile.value) {
     fileError.value = 'Choose a PDF or TXT resume before analyzing.'
     return
   }
@@ -239,21 +188,44 @@ async function analyzeResume() {
   isBusy.value = true
   fileError.value = ''
   message.value = ''
+  selectedAnalysis.value = null
 
   try {
-    const formData = new FormData()
-    formData.append('file', selectedFile.value)
-    formData.append('analysis_level', analysisLevel.value)
-    formData.append('summary_style', summaryStyle.value)
+    let filename = sampleResume.fileName
+    let text = sampleResume.text
+
+    if (!isSampleResume.value) {
+      const formData = new FormData()
+      formData.append('file', selectedFile.value)
+      const extractionResponse = await fetch('/api/resumes/extract', {
+        method: 'POST',
+        body: formData,
+      })
+      const extraction = await extractionResponse.json().catch(() => ({}))
+      if (!extractionResponse.ok) {
+        throw new Error(extraction.detail || 'The backend could not extract text from this resume.')
+      }
+      filename = extraction.filename
+      text = extraction.text
+    }
 
     const response = await fetch('/api/resumes/analyze', {
       method: 'POST',
-      body: formData,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename,
+        text,
+        analysis_level: analysisLevel.value,
+        summary_style: summaryStyle.value,
+      }),
     })
 
     const data = await response.json().catch(() => ({}))
     if (!response.ok) {
-      throw new Error(data.detail || 'The backend could not analyze this resume.')
+      const detail = Array.isArray(data.detail)
+        ? data.detail.map((issue) => issue.msg).join(' ')
+        : data.detail
+      throw new Error(detail || 'The backend could not analyze this resume.')
     }
 
     const analysisResult = {
@@ -262,7 +234,9 @@ async function analyzeResume() {
     }
 
     selectedAnalysis.value = analysisResult
-    analysisHistory.value = [analysisResult, ...analysisHistory.value.filter((resume) => resume.filename !== analysisResult.filename)].slice(0, 8)
+    if (!isSampleResume.value) {
+      analysisHistory.value = [analysisResult, ...analysisHistory.value.filter((resume) => resume.filename !== analysisResult.filename)].slice(0, 8)
+    }
     message.value = analysisResult.message || 'Resume analyzed successfully.'
   } catch (error) {
     fileError.value =
@@ -502,7 +476,12 @@ onBeforeUnmount(() => {
                     <h3>Summary</h3>
                     <p>{{ selectedAnalysis.filename }}</p>
                   </div>
+                  <span class="analysis-mode-badge" :class="{ 'demo-mode-badge': selectedAnalysis.analysis_status === 'demo_mode' }">
+                    {{ selectedAnalysis.analysis_status === 'demo_mode' ? 'DEMO MODE' : 'GEMINI AI' }}
+                  </span>
                 </div>
+                <p v-if="selectedAnalysis.candidate_name" class="candidate-name">{{ selectedAnalysis.candidate_name }}</p>
+                <p v-if="selectedAnalysis.contact_details?.length" class="candidate-contact">{{ selectedAnalysis.contact_details.join(' · ') }}</p>
                 <p class="analysis-summary">{{ selectedAnalysis.summary }}</p>
               </section>
 
@@ -529,8 +508,19 @@ onBeforeUnmount(() => {
                       <p>Skills identified in the resume</p>
                     </div>
                   </div>
-                  <div v-if="selectedAnalysis?.skills?.length" class="chip-list">
-                    <span v-for="skill in selectedAnalysis.skills" :key="skill" class="skill-chip">{{ skill }}</span>
+                  <div v-if="selectedAnalysis?.skills?.length" class="skill-groups">
+                    <div v-if="selectedAnalysis.technical_skills?.length">
+                      <strong>Technical</strong>
+                      <div class="chip-list">
+                        <span v-for="skill in selectedAnalysis.technical_skills" :key="`technical-${skill}`" class="skill-chip">{{ skill }}</span>
+                      </div>
+                    </div>
+                    <div v-if="selectedAnalysis.soft_skills?.length">
+                      <strong>Soft skills</strong>
+                      <div class="chip-list">
+                        <span v-for="skill in selectedAnalysis.soft_skills" :key="`soft-${skill}`" class="skill-chip">{{ skill }}</span>
+                      </div>
+                    </div>
                   </div>
                   <p v-else class="placeholder-copy">No skills extracted yet.</p>
                 </section>
@@ -553,13 +543,20 @@ onBeforeUnmount(() => {
                   <div class="result-title-group">
                     <div class="heading-icon slate-icon"><BriefcaseBusiness :size="17" /></div>
                     <div>
-                      <h3>Experience</h3>
+                      <h3>Internships &amp; work</h3>
                       <p>Professional experience</p>
                     </div>
                   </div>
-                  <ul v-if="selectedAnalysis?.experience?.length" class="detail-list">
-                    <li v-for="item in selectedAnalysis.experience" :key="item">{{ item }}</li>
-                  </ul>
+                  <template v-if="selectedAnalysis?.experience?.length">
+                    <strong v-if="selectedAnalysis.internships?.length" class="detail-label">Internships</strong>
+                    <ul v-if="selectedAnalysis.internships?.length" class="detail-list">
+                      <li v-for="item in selectedAnalysis.internships" :key="`internship-${item}`">{{ item }}</li>
+                    </ul>
+                    <strong v-if="selectedAnalysis.work_experience?.length" class="detail-label">Work experience</strong>
+                    <ul v-if="selectedAnalysis.work_experience?.length" class="detail-list">
+                      <li v-for="item in selectedAnalysis.work_experience" :key="`work-${item}`">{{ item }}</li>
+                    </ul>
+                  </template>
                   <p v-else class="placeholder-copy">Experience details will appear here.</p>
                 </section>
 
@@ -587,6 +584,50 @@ onBeforeUnmount(() => {
                   </div>
                 </section>
               </div>
+
+              <section v-if="selectedAnalysis" class="analysis-details-grid">
+                <section class="card result-card insight-card">
+                  <div class="result-title-group">
+                    <div class="heading-icon blue-icon"><FileText :size="17" /></div>
+                    <div><h3>Projects</h3><p>Projects identified in the resume</p></div>
+                  </div>
+                  <ul v-if="selectedAnalysis.projects?.length" class="detail-list">
+                    <li v-for="item in selectedAnalysis.projects" :key="item">{{ item }}</li>
+                  </ul>
+                  <p v-else class="placeholder-copy">No projects found.</p>
+                </section>
+                <section class="card result-card insight-card">
+                  <div class="result-title-group">
+                    <div class="heading-icon amber-icon"><Check :size="17" /></div>
+                    <div><h3>Certifications &amp; achievements</h3><p>Credentials and recognition</p></div>
+                  </div>
+                  <ul v-if="selectedAnalysis.certifications?.length || selectedAnalysis.achievements?.length" class="detail-list">
+                    <li v-for="item in selectedAnalysis.certifications" :key="`cert-${item}`">{{ item }}</li>
+                    <li v-for="item in selectedAnalysis.achievements" :key="`achievement-${item}`">{{ item }}</li>
+                  </ul>
+                  <p v-else class="placeholder-copy">No certifications or achievements found.</p>
+                </section>
+                <section class="card result-card insight-card">
+                  <div class="result-title-group">
+                    <div class="heading-icon slate-icon"><Search :size="17" /></div>
+                    <div><h3>Missing information</h3><p>Details not found by analysis</p></div>
+                  </div>
+                  <ul v-if="selectedAnalysis.missing_information?.length" class="detail-list">
+                    <li v-for="item in selectedAnalysis.missing_information" :key="item">{{ item }}</li>
+                  </ul>
+                  <p v-else class="placeholder-copy">No obvious missing information found.</p>
+                </section>
+                <section class="card result-card insight-card">
+                  <div class="result-title-group">
+                    <div class="heading-icon green-icon"><Sparkles :size="17" /></div>
+                    <div><h3>Improvement suggestions</h3><p>Ways to strengthen the resume</p></div>
+                  </div>
+                  <ul v-if="selectedAnalysis.improvement_suggestions?.length" class="detail-list">
+                    <li v-for="item in selectedAnalysis.improvement_suggestions" :key="item">{{ item }}</li>
+                  </ul>
+                  <p v-else class="placeholder-copy">No suggestions returned.</p>
+                </section>
+              </section>
 
               <section class="card recent-card">
                 <div class="recent-header">

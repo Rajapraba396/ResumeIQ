@@ -1,11 +1,18 @@
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 
 from app.schemas.resume import (
+    ResumeAnalysisRequest,
     ResumeAnalysisResponse,
     ResumeExtractionResponse,
     ResumeTextExtractionResponse,
 )
-from app.services.gemini_service import analyze_resume_text
+from app.services.gemini_service import (
+    GeminiAnalysisError,
+    GeminiRequestError,
+    InvalidGeminiResponseError,
+    analyze_resume_text,
+)
 from app.services.pdf_service import (
     InvalidResumeFileError,
     NoSelectableTextError,
@@ -17,17 +24,6 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 MAX_UPLOAD_SIZE = 5 * 1024 * 1024
 UPLOAD_READ_CHUNK_SIZE = 64 * 1024
 ALLOWED_EXTENSIONS = {"pdf", "txt"}
-
-
-def _normalize_option(value: str | None, allowed: set[str], default: str) -> str:
-    if value is None:
-        return default
-    normalized = str(value).strip().lower().replace("_", " ")
-    if normalized in {"basic", "standard", "detailed"}:
-        return {"basic": "Basic", "standard": "Standard", "detailed": "Detailed"}[normalized]
-    if normalized in {"brief", "detailed", "bullet points", "bullet-points", "bullets"}:
-        return {"brief": "Brief", "detailed": "Detailed", "bullet points": "Bullet Points", "bullet-points": "Bullet Points", "bullets": "Bullet Points"}[normalized]
-    return default if normalized not in allowed else value.strip()
 
 
 async def _extract_uploaded_resume(file: UploadFile) -> tuple[str, str, str]:
@@ -114,33 +110,35 @@ async def extract_resume(file: UploadFile = File(...)) -> ResumeTextExtractionRe
 @router.post(
     "/resumes/analyze",
     response_model=ResumeAnalysisResponse,
-    summary="Analyze a resume using Gemini when configured or a demo fallback",
+    summary="Analyze extracted resume text using Gemini or an explicitly labelled demo",
 )
-async def analyze_resume(
-    file: UploadFile = File(...),
-    analysis_level: str = Form(default="Standard"),
-    summary_style: str = Form(default="Brief"),
-) -> ResumeAnalysisResponse:
-    filename, file_type, extracted_text = await _extract_uploaded_resume(file)
-    normalized_level = _normalize_option(analysis_level, {"basic", "standard", "detailed"}, "Standard")
-    normalized_style = _normalize_option(summary_style, {"brief", "detailed", "bullet points"}, "Brief")
-    analysis = analyze_resume_text(extracted_text, normalized_level, normalized_style)
+async def analyze_resume(request: ResumeAnalysisRequest) -> ResumeAnalysisResponse:
+    try:
+        analysis = await run_in_threadpool(
+            analyze_resume_text,
+            request.filename,
+            request.text,
+            request.analysis_level,
+            request.summary_style,
+        )
+    except InvalidGeminiResponseError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(error),
+        ) from error
+    except GeminiRequestError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(error),
+        ) from error
+    except GeminiAnalysisError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(error),
+        ) from error
 
-    return ResumeAnalysisResponse(
-        filename=filename,
-        file_type=file_type,
-        extracted_text=extracted_text,
-        analysis_status=analysis["analysis_status"],
-        message=analysis["message"],
-        summary=analysis["summary"],
-        skills=analysis["skills"],
-        experience=analysis["experience"],
-        education=analysis["education"],
-        completeness=analysis["completeness"],
-        highlights=analysis["highlights"],
-        analysis_level=analysis["analysis_level"],
-        summary_style=analysis["summary_style"],
-    )
+    analysis["file_type"] = "PDF" if request.filename.lower().endswith(".pdf") else "TXT"
+    return ResumeAnalysisResponse(**analysis)
 
 
 @router.post(
